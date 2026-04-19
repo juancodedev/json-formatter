@@ -3,6 +3,7 @@ import { EditorState } from '@codemirror/state';
 import { json } from '@codemirror/lang-json';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { placeholder } from '@codemirror/view';
+import { search, highlightSelectionMatches } from '@codemirror/search';
 
 // --- State and Config ---
 let editor;
@@ -18,6 +19,8 @@ const elements = {
   clearBtn: document.getElementById('clearBtn'),
   fileUpload: document.getElementById('fileUpload'),
   themeToggle: document.getElementById('themeToggle'),
+  sidebarToggle: document.getElementById('sidebarToggle'),
+  mainContainer: document.querySelector('.main-container'),
   statusText: document.querySelector('.status-text'),
   statusPanel: document.getElementById('status')
 };
@@ -27,6 +30,10 @@ async function init() {
   const savedPrefs = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
   const theme = savedPrefs.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   document.documentElement.setAttribute('data-theme', theme);
+
+  if (savedPrefs.sidebarHidden) {
+    elements.mainContainer.classList.add('sidebar-hidden');
+  }
 
   setupEditor(theme === 'dark');
   setupEventListeners();
@@ -49,6 +56,8 @@ function setupEditor(isDark) {
     basicSetup,
     json(),
     placeholder('Paste your "messy" JSON here...'),
+    search({ top: true }),
+    highlightSelectionMatches()
   ];
 
   if (isDark) {
@@ -208,6 +217,14 @@ function setupEventListeners() {
   elements.fileUpload.addEventListener('change', handleFileUpload);
   elements.themeToggle.addEventListener('click', toggleTheme);
   
+  elements.sidebarToggle.addEventListener('click', () => {
+    elements.mainContainer.classList.toggle('sidebar-hidden');
+    // Save preference
+    const prefs = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    prefs.sidebarHidden = elements.mainContainer.classList.contains('sidebar-hidden');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  });
+
   // Shortcuts
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
