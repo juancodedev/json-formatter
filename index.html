@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JSON Formatter</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>JSON Formatter</h1>
+      <p class="subtitle">Paste JSON, then format or minify it.</p>
+
+      <textarea
+        id="jsonInput"
+        placeholder='Example: {"name":"Oz","tools":["format","minify"]}'
+      ></textarea>
+
+      <div class="actions">
+        <button id="formatBtn" type="button">Format</button>
+        <button id="minifyBtn" type="button">Minify</button>
+        <button id="clearBtn" type="button" class="secondary">Clear</button>
+      </div>
+
+      <p id="status" class="status"></p>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
