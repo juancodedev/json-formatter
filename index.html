@@ -3,28 +3,71 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>JSON Formatter</title>
+    <title>Premium JSON Formatter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="container">
-      <h1>JSON Formatter</h1>
-      <p class="subtitle">Paste JSON, then format or minify it.</p>
+    <div class="app-layout">
+      <header class="app-header">
+        <div class="logo">
+          <span class="icon">{}</span>
+          <h1>JSON<span>Formatter</span></h1>
+        </div>
+        <div class="header-actions">
+          <button id="themeToggle" title="Toggle Theme" class="icon-btn">
+            <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+      </header>
 
-      <textarea
-        id="jsonInput"
-        placeholder='Example: {"name":"Oz","tools":["format","minify"]}'
-      ></textarea>
+      <main class="main-container">
+        <section class="editor-section">
+          <div id="editor-container"></div>
+        </section>
 
-      <div class="actions">
-        <button id="formatBtn" type="button">Format</button>
-        <button id="minifyBtn" type="button">Minify</button>
-        <button id="clearBtn" type="button" class="secondary">Clear</button>
-      </div>
+        <aside class="controls-section">
+          <div class="card">
+            <h3>Options</h3>
+            <div class="control-group">
+              <label for="indent-size">Indentation</label>
+              <select id="indent-size">
+                <option value="2">2 Spaces</option>
+                <option value="4" selected>4 Spaces</option>
+                <option value="tabs">Tabs</option>
+              </select>
+            </div>
+            
+            <div class="control-group">
+              <label>Actions</label>
+              <div class="action-grid">
+                <button id="formatBtn" class="primary-btn">Format</button>
+                <button id="minifyBtn" class="secondary-btn">Minify</button>
+                <button id="copyBtn" class="secondary-btn">Copy</button>
+                <button id="downloadBtn" class="secondary-btn">Download</button>
+                <button id="clearBtn" class="danger-btn">Clear</button>
+              </div>
+            </div>
 
-      <p id="status" class="status"></p>
-    </main>
+            <div class="control-group">
+              <label for="fileUpload">Import File</label>
+              <input type="file" id="fileUpload" accept=".json,application/json" class="file-input" />
+            </div>
+          </div>
 
-    <script src="app.js"></script>
+          <div id="status" class="status-panel">
+            <span class="status-dot"></span>
+            <span class="status-text">Ready</span>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <!-- js-beautify for advanced formatting -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.7/beautify.min.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
