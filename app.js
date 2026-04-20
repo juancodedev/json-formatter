@@ -5,6 +5,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { placeholder } from '@codemirror/view';
 import { search, highlightSelectionMatches } from '@codemirror/search';
 import { autoUnpack } from './unpackers.js';
+import { jsonrepair } from 'jsonrepair';
 
 // --- State and Config ---
 let editor;
@@ -96,65 +97,70 @@ function setEditorContent(text) {
  */
 function trySmartParse(text) {
   text = text.trim();
-  
-  // 0. Intentar des-ofuscar/des-empaquetar el texto automáticamente
-  try {
-    text = autoUnpack(text);
-  } catch (e) {
-    console.warn("Unpack failed, continuing with original text", e);
-  }
+  if (!text) return null;
 
-  // Quitar comillas externas si se pegó el bloque como un string
+  // PASO 1 — Des-ofuscar/Des-empaquetar (P.A.C.K.E.R., URL encode, etc.)
+  try { text = autoUnpack(text); } catch (e) { /* silencioso */ }
+
+  // PASO 2 — Quitar comillas externas si se pegó el bloque como string literal
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
     text = text.substring(1, text.length - 1);
   }
 
+  // PASO 3 — Intento rápido de JSON estándar
+  try { return JSON.parse(text); } catch (_) { /* continuar */ }
+
+  // PASO 4 — Preprocesador de objetos Python nativos
+  // Proteger objetos que no tienen equivalente JSON (datetime, Decimal, <...>, u'...')
+  // para que jsonrepair y JSON.parse no los malinterpreten.
+  const protectedObjs = [];
+  const protect = (match) => {
+    protectedObjs.push(match);
+    return `"${PY_OBJ_MARKER}${protectedObjs.length - 1}"`;
+  };
+
+  let preprocessed = text
+    // 4a. Strings unicode Python 2: u'texto' o u"texto"
+    .replace(/\bu'([^']*)'/g, (_, inner) => protect(`u'${inner}'`))
+    .replace(/\bu"([^"]*)"/g, (_, inner) => protect(`u"${inner}"`))
+    // 4b. Objetos Django/Python entre < >
+    .replace(/<[^>]+>/g, protect)
+    // 4c. Llamadas a funciones Python: datetime.datetime(...), Decimal(...), etc.
+    .replace(/[a-zA-Z_][a-zA-Z0-9_.]*\([^)]*\)/g, protect)
+    // 4d. Booleanos y None de Python → JSON
+    .replace(/\bTrue\b/g, 'true')
+    .replace(/\bFalse\b/g, 'false')
+    .replace(/\bNone\b/g, 'null');
+
+  // PASO 5 — jsonrepair: repara cualquier JSON-like (claves sin comillas,
+  //          comillas simples, comas finales, comentarios, etc.)
+  let repaired;
   try {
-    return JSON.parse(text);
-  } catch (e) {
-    try {
-      const protectedObjs = [];
-      // 1. Extraer y proteger objetos complejos (Decimal, datetime, <...>)
-      // Esta regex busca funciones como Decimal(), datetime.datetime() y objetos de Django <...>
-      let repaired = text.replace(/(Decimal\(['"]?[^'"]*['"]?\)|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_]+\([^)]*\)|<[^>]+>)/g, (match) => {
-        protectedObjs.push(match);
-        return `"${PY_OBJ_MARKER}${protectedObjs.length - 1}"`;
-      });
-
-      // 2. Traducir tipos básicos y normalizar JSON
-      repaired = repaired
-        .replace(/\bTrue\b/g, 'true')
-        .replace(/\bFalse\b/g, 'false')
-        .replace(/\bNone\b/g, 'null')
-        .replace(/'/g, '"') 
-        .replace(/(['"])?([a-zA-Z0-9_\-]+)(['"])?\s*:/g, '"$2":')
-        .replace(/,\s*([\]}])/g, '$1');
-
-      const parsed = JSON.parse(repaired);
-
-      // 3. Función recursiva para reinyectar los objetos originales marcados
-      const inject = (obj) => {
-        if (typeof obj === 'string' && obj.startsWith(PY_OBJ_MARKER)) {
-          const index = parseInt(obj.replace(PY_OBJ_MARKER, ''));
-          return PY_OBJ_MARKER + protectedObjs[index];
-        }
-        if (Array.isArray(obj)) return obj.map(inject);
-        if (obj !== null && typeof obj === 'object') {
-          const newObj = {};
-          for (const key in obj) {
-            newObj[key] = inject(obj[key]);
-          }
-          return newObj;
-        }
-        return obj;
-      };
-
-      return inject(parsed);
-    } catch (innerError) {
-      console.error("Smart Parse failed:", innerError);
-      throw e; 
-    }
+    repaired = jsonrepair(preprocessed);
+  } catch (repairError) {
+    // Si jsonrepair falla, lanzamos el error original de JSON.parse
+    throw new SyntaxError(`No se pudo interpretar el contenido: ${repairError.message}`);
   }
+
+  // PASO 6 — Parsear el JSON ya reparado
+  const parsed = JSON.parse(repaired);
+
+  // PASO 7 — Reinyectar los objetos Python originales (marcados en el paso 4)
+  const inject = (obj) => {
+    if (typeof obj === 'string' && obj.startsWith(PY_OBJ_MARKER)) {
+      const index = parseInt(obj.replace(PY_OBJ_MARKER, ''), 10);
+      return PY_OBJ_MARKER + protectedObjs[index];
+    }
+    if (Array.isArray(obj)) return obj.map(inject);
+    if (obj !== null && typeof obj === 'object') {
+      const newObj = {};
+      for (const key in obj) newObj[key] = inject(obj[key]);
+      return newObj;
+    }
+    return obj;
+  };
+
+  return inject(parsed);
 }
 
 // --- Actions ---
