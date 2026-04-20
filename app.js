@@ -4,14 +4,17 @@ import { json } from '@codemirror/lang-json';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { placeholder } from '@codemirror/view';
 import { search, highlightSelectionMatches } from '@codemirror/search';
+import { autoUnpack } from './unpackers.js';
 
 // --- State and Config ---
 let editor;
 const STORAGE_KEY = 'json_formatter_prefs';
+const PY_OBJ_MARKER = '___PY_OBJ___';
 
 const elements = {
   container: document.getElementById('editor-container'),
   indentSize: document.getElementById('indent-size'),
+  outputFormat: document.getElementById('output-format'),
   formatBtn: document.getElementById('formatBtn'),
   minifyBtn: document.getElementById('minifyBtn'),
   copyBtn: document.getElementById('copyBtn'),
@@ -31,6 +34,8 @@ async function init() {
   const theme = savedPrefs.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   document.documentElement.setAttribute('data-theme', theme);
 
+  if (savedPrefs.indent) elements.indentSize.value = savedPrefs.indent;
+  if (savedPrefs.format) elements.outputFormat.value = savedPrefs.format;
   if (savedPrefs.sidebarHidden) {
     elements.mainContainer.classList.add('sidebar-hidden');
   }
@@ -91,20 +96,63 @@ function setEditorContent(text) {
  */
 function trySmartParse(text) {
   text = text.trim();
-  if (!text) return null;
+  
+  // 0. Intentar des-ofuscar/des-empaquetar el texto automáticamente
+  try {
+    text = autoUnpack(text);
+  } catch (e) {
+    console.warn("Unpack failed, continuing with original text", e);
+  }
+
+  // Quitar comillas externas si se pegó el bloque como un string
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.substring(1, text.length - 1);
+  }
 
   try {
     return JSON.parse(text);
   } catch (e) {
-    // Intento de reparación para formatos "relajados" (comunes al copiar de consola)
     try {
-      const repaired = text
-        .replace(/,\s*([\]}])/g, '$1') // Comas finales
-        .replace(/(['"])?([a-zA-Z0-9_\-]+)(['"])?\s*:/g, '"$2":') // Claves sin comillas o con comillas simples
-        .replace(/'/g, '"'); // Comillas simples en valores
-      return JSON.parse(repaired);
+      const protectedObjs = [];
+      // 1. Extraer y proteger objetos complejos (Decimal, datetime, <...>)
+      // Esta regex busca funciones como Decimal(), datetime.datetime() y objetos de Django <...>
+      let repaired = text.replace(/(Decimal\(['"]?[^'"]*['"]?\)|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_]+\([^)]*\)|<[^>]+>)/g, (match) => {
+        protectedObjs.push(match);
+        return `"${PY_OBJ_MARKER}${protectedObjs.length - 1}"`;
+      });
+
+      // 2. Traducir tipos básicos y normalizar JSON
+      repaired = repaired
+        .replace(/\bTrue\b/g, 'true')
+        .replace(/\bFalse\b/g, 'false')
+        .replace(/\bNone\b/g, 'null')
+        .replace(/'/g, '"') 
+        .replace(/(['"])?([a-zA-Z0-9_\-]+)(['"])?\s*:/g, '"$2":')
+        .replace(/,\s*([\]}])/g, '$1');
+
+      const parsed = JSON.parse(repaired);
+
+      // 3. Función recursiva para reinyectar los objetos originales marcados
+      const inject = (obj) => {
+        if (typeof obj === 'string' && obj.startsWith(PY_OBJ_MARKER)) {
+          const index = parseInt(obj.replace(PY_OBJ_MARKER, ''));
+          return PY_OBJ_MARKER + protectedObjs[index];
+        }
+        if (Array.isArray(obj)) return obj.map(inject);
+        if (obj !== null && typeof obj === 'object') {
+          const newObj = {};
+          for (const key in obj) {
+            newObj[key] = inject(obj[key]);
+          }
+          return newObj;
+        }
+        return obj;
+      };
+
+      return inject(parsed);
     } catch (innerError) {
-      throw e; // Lanzamos el error original si el reparado también falla
+      console.error("Smart Parse failed:", innerError);
+      throw e; 
     }
   }
 }
@@ -128,14 +176,80 @@ function formatJson() {
     if (!parsed) return;
     
     const indent = elements.indentSize.value;
+    const format = elements.outputFormat.value;
     const spacer = indent === 'tabs' ? '\t' : parseInt(indent);
     
-    const formatted = JSON.stringify(parsed, null, spacer);
-    setEditorContent(formatted);
-    setStatus('Formatted successfully', 'ok');
-  } catch (e) {
-    setStatus('Invalid JSON/Object: ' + e.message, 'error');
+  let formatted;
+  if (format === 'python') {
+    formatted = stringifyPython(parsed, spacer);
+  } else {
+    // Si es JSON, limpiamos los marcadores antes de stringify
+    const cleaned = stripMarkers(parsed);
+    formatted = JSON.stringify(cleaned, null, spacer);
   }
+    
+    setEditorContent(formatted);
+    setStatus(`Formatted as ${format.toUpperCase()} successfully`, 'ok');
+  } catch (e) {
+    setStatus('Invalid Format: ' + e.message, 'error');
+  }
+}
+
+/**
+ * Stringificador personalizado para formato de diccionario de Python
+ */
+function stringifyPython(obj, indent, level = 0) {
+  const space = typeof indent === 'string' ? indent : ' '.repeat(indent);
+  const currentIndent = space.repeat(level);
+  const nextIndent = space.repeat(level + 1);
+
+  if (obj === null) return 'None';
+  if (obj === true) return 'True';
+  if (obj === false) return 'False';
+
+  if (typeof obj === 'string') {
+    // Si es un objeto de Python marcado, quitamos la marca y devolvemos SIN comillas
+    if (obj.startsWith(PY_OBJ_MARKER)) {
+      return obj.split(PY_OBJ_MARKER).join('');
+    }
+    // Escapar comillas simples y envolver
+    return `'${obj.replace(/'/g, "\\'")}'`;
+  }
+
+  if (typeof obj !== 'object') return obj.toString();
+
+  const isArray = Array.isArray(obj);
+  const open = isArray ? '[' : '{';
+  const close = isArray ? ']' : '}';
+  
+  const entries = isArray 
+    ? obj.map(item => stringifyPython(item, indent, level + 1))
+    : Object.entries(obj).map(([key, val]) => {
+        const pyKey = typeof key === 'string' ? `'${key}'` : key;
+        return `${pyKey}: ${stringifyPython(val, indent, level + 1)}`;
+      });
+
+  if (entries.length === 0) return `${open}${close}`;
+
+  return `${open}\n${nextIndent}${entries.join(',\n' + nextIndent)}\n${currentIndent}${close}`;
+}
+
+/**
+ * Elimina los marcadores internos para cuando se exporta a JSON puro
+ */
+function stripMarkers(obj) {
+  if (typeof obj === 'string') {
+    return obj.startsWith(PY_OBJ_MARKER) ? obj.split(PY_OBJ_MARKER).join('') : obj;
+  }
+  if (Array.isArray(obj)) return obj.map(stripMarkers);
+  if (obj !== null && typeof obj === 'object') {
+    const newObj = {};
+    for (const key in obj) {
+      newObj[key] = stripMarkers(obj[key]);
+    }
+    return newObj;
+  }
+  return obj;
 }
 
 function minifyJson() {
@@ -235,6 +349,12 @@ function setupEventListeners() {
   elements.indentSize.addEventListener('change', () => {
     const prefs = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
     prefs.indent = elements.indentSize.value;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  });
+
+  elements.outputFormat.addEventListener('change', () => {
+    const prefs = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    prefs.format = elements.outputFormat.value;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
   });
 }
