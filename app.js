@@ -10,7 +10,7 @@ import { jsonrepair } from 'jsonrepair';
 // --- State and Config ---
 let editor;
 const STORAGE_KEY = 'json_formatter_prefs';
-const PY_OBJ_MARKER = '___PY_OBJ___';
+const PY_OBJ_MARKER = '___PY_INTERNAL_OBJ___';
 
 const elements = {
   container: document.getElementById('editor-container'),
@@ -108,7 +108,9 @@ function trySmartParse(text) {
   }
 
   // PASO 3 — Intento rápido de JSON estándar
-  try { return JSON.parse(text); } catch (_) { /* continuar */ }
+  try { 
+    return { data: JSON.parse(text), format: 'json' }; 
+  } catch (_) { /* continuar */ }
 
   // PASO 4 — Preprocesador de objetos Python nativos
   // Proteger objetos que no tienen equivalente JSON (datetime, Decimal, <...>, u'...')
@@ -119,14 +121,25 @@ function trySmartParse(text) {
     return `"${PY_OBJ_MARKER}${protectedObjs.length - 1}"`;
   };
 
-  let preprocessed = text
-    // 4a. Strings unicode Python 2: u'texto' o u"texto"
-    .replace(/\bu'([^']*)'/g, (_, inner) => protect(`u'${inner}'`))
-    .replace(/\bu"([^"]*)"/g, (_, inner) => protect(`u"${inner}"`))
-    // 4b. Objetos Django/Python entre < >
-    .replace(/<[^>]+>/g, protect)
-    // 4c. Llamadas a funciones Python: datetime.datetime(...), Decimal(...), etc.
-    .replace(/[a-zA-Z_][a-zA-Z0-9_.]*\([^)]*\)/g, protect)
+  let preprocessed = text;
+  
+  // 4a. Strings unicode Python 2 (soporte para comillas escapadas)
+  preprocessed = preprocessed
+    .replace(/\bu'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_, inner) => protect(`u'${inner}'`))
+    .replace(/\bu"([^"\\]*(?:\\.[^"\\]*)*)"/g, (_, inner) => protect(`u"${inner}"`));
+
+  // 4b & 4c. Objetos y Funciones (anidados, ej: <QuerySet [<Model: ...>]>, func(other()))
+  let changed = true;
+  while (changed) {
+    const original = preprocessed;
+    // Marcamos los objetos más internos primero (entre < > sin otros < > dentro)
+    preprocessed = preprocessed.replace(/<[^<>]+>/g, protect);
+    // Marcamos las funciones más internas primero
+    preprocessed = preprocessed.replace(/[a-zA-Z_][a-zA-Z0-9_.]*\([^()]*\)/g, protect);
+    changed = (preprocessed !== original);
+  }
+
+  preprocessed = preprocessed
     // 4d. Booleanos y None de Python → JSON
     .replace(/\bTrue\b/g, 'true')
     .replace(/\bFalse\b/g, 'false')
@@ -147,20 +160,45 @@ function trySmartParse(text) {
 
   // PASO 7 — Reinyectar los objetos Python originales (marcados en el paso 4)
   const inject = (obj) => {
-    if (typeof obj === 'string' && obj.startsWith(PY_OBJ_MARKER)) {
-      const index = parseInt(obj.replace(PY_OBJ_MARKER, ''), 10);
-      return PY_OBJ_MARKER + protectedObjs[index];
+    if (typeof obj === 'string') {
+      // Limpiar posibles comillas de escape de jsonrepair si existen
+      let markerCandidate = obj;
+      if (obj.startsWith('"') && obj.endsWith('"') && obj.includes(PY_OBJ_MARKER)) {
+        markerCandidate = obj.slice(1, -1);
+      }
+
+      if (markerCandidate.startsWith(PY_OBJ_MARKER)) {
+        const indexStr = markerCandidate.replace(PY_OBJ_MARKER, '');
+        const index = parseInt(indexStr, 10);
+        
+        if (isNaN(index) || index < 0 || index >= protectedObjs.length) {
+          return obj;
+        }
+
+        let value = protectedObjs[index];
+        // Resolvemos marcadores anidados (pueden estar con o sin comillas escapadas)
+        const nestedRegex = new RegExp(`"?${PY_OBJ_MARKER}(\\d+)"?`, 'g');
+        value = value.replace(nestedRegex, (_, idx) => {
+          const res = inject(PY_OBJ_MARKER + idx);
+          return res.startsWith(PY_OBJ_MARKER) ? res.slice(PY_OBJ_MARKER.length) : res;
+        });
+        return PY_OBJ_MARKER + value;
+      }
     }
     if (Array.isArray(obj)) return obj.map(inject);
     if (obj !== null && typeof obj === 'object') {
       const newObj = {};
-      for (const key in obj) newObj[key] = inject(obj[key]);
+      for (const key in obj) {
+        // Resolvemos el marcador pero MANTENEMOS el prefijo para que el stringifier sepa que es un objeto Python
+        const resolvedKey = inject(key);
+        newObj[resolvedKey] = inject(obj[key]);
+      }
       return newObj;
     }
     return obj;
   };
 
-  return inject(parsed);
+  return { data: inject(parsed), format: protectedObjs.length > 0 ? 'python' : 'json' };
 }
 
 // --- Actions ---
@@ -178,24 +216,25 @@ function setStatus(message, type = '') {
 function formatJson() {
   const content = getEditorContent();
   try {
-    const parsed = trySmartParse(content);
-    if (!parsed) return;
+    const { data, format: detectedFormat } = trySmartParse(content);
+    if (!data) return;
     
     const indent = elements.indentSize.value;
-    const format = elements.outputFormat.value;
+    const selectedFormat = elements.outputFormat.value;
+    const actualFormat = selectedFormat === 'auto' ? detectedFormat : selectedFormat;
+    
     const spacer = indent === 'tabs' ? '\t' : parseInt(indent);
     
-  let formatted;
-  if (format === 'python') {
-    formatted = stringifyPython(parsed, spacer);
-  } else {
-    // Si es JSON, limpiamos los marcadores antes de stringify
-    const cleaned = stripMarkers(parsed);
-    formatted = JSON.stringify(cleaned, null, spacer);
-  }
+    let formatted;
+    if (actualFormat === 'python') {
+      formatted = stringifyPython(data, spacer);
+    } else {
+      const cleaned = stripMarkers(data);
+      formatted = JSON.stringify(cleaned, null, spacer);
+    }
     
     setEditorContent(formatted);
-    setStatus(`Formatted as ${format.toUpperCase()} successfully`, 'ok');
+    setStatus(`Formatted as ${actualFormat.toUpperCase()} successfully`, 'ok');
   } catch (e) {
     setStatus('Invalid Format: ' + e.message, 'error');
   }
@@ -216,7 +255,7 @@ function stringifyPython(obj, indent, level = 0) {
   if (typeof obj === 'string') {
     // Si es un objeto de Python marcado, quitamos la marca y devolvemos SIN comillas
     if (obj.startsWith(PY_OBJ_MARKER)) {
-      return obj.split(PY_OBJ_MARKER).join('');
+      return obj.slice(PY_OBJ_MARKER.length);
     }
     // Escapar comillas simples y envolver
     return `'${obj.replace(/'/g, "\\'")}'`;
@@ -231,7 +270,12 @@ function stringifyPython(obj, indent, level = 0) {
   const entries = isArray 
     ? obj.map(item => stringifyPython(item, indent, level + 1))
     : Object.entries(obj).map(([key, val]) => {
-        const pyKey = typeof key === 'string' ? `'${key}'` : key;
+        let pyKey;
+        if (typeof key === 'string' && key.startsWith(PY_OBJ_MARKER)) {
+          pyKey = key.slice(PY_OBJ_MARKER.length);
+        } else {
+          pyKey = typeof key === 'string' ? `'${key}'` : key;
+        }
         return `${pyKey}: ${stringifyPython(val, indent, level + 1)}`;
       });
 
@@ -245,13 +289,26 @@ function stringifyPython(obj, indent, level = 0) {
  */
 function stripMarkers(obj) {
   if (typeof obj === 'string') {
-    return obj.startsWith(PY_OBJ_MARKER) ? obj.split(PY_OBJ_MARKER).join('') : obj;
+    if (obj.startsWith(PY_OBJ_MARKER)) {
+      let val = obj.slice(PY_OBJ_MARKER.length);
+      // Limpieza de tipos Python para JSON puro
+      // u'texto' -> texto
+      if (/^u['"]/.test(val)) return val.substring(2, val.length - 1);
+      // Decimal('100') -> 100
+      if (/^Decimal\(/.test(val)) {
+        const m = val.match(/\(['"]?(.+?)['"]?\)/);
+        if (m) return isNaN(m[1]) ? m[1] : parseFloat(m[1]);
+      }
+      return val;
+    }
+    return obj;
   }
   if (Array.isArray(obj)) return obj.map(stripMarkers);
   if (obj !== null && typeof obj === 'object') {
     const newObj = {};
     for (const key in obj) {
-      newObj[key] = stripMarkers(obj[key]);
+      const cleanKey = key.startsWith(PY_OBJ_MARKER) ? stripMarkers(key) : key;
+      newObj[cleanKey] = stripMarkers(obj[key]);
     }
     return newObj;
   }
@@ -261,9 +318,10 @@ function stripMarkers(obj) {
 function minifyJson() {
   const content = getEditorContent();
   try {
-    const parsed = trySmartParse(content);
-    if (!parsed) return;
-    setEditorContent(JSON.stringify(parsed));
+    const { data } = trySmartParse(content);
+    if (!data) return;
+    const cleaned = stripMarkers(data);
+    setEditorContent(JSON.stringify(cleaned));
     setStatus('Minified successfully', 'ok');
   } catch (e) {
     setStatus('Error: ' + e.message, 'error');
