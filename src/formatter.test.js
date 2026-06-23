@@ -528,3 +528,124 @@ describe('stringifyPython', () => {
     expect(output).toContain('scores');
   });
 });
+
+// ============================================================================
+// Python tuples — conversión y renderizado
+// ============================================================================
+describe('Python tuples', () => {
+  it('parses single-element tuple with trailing comma', () => {
+    const input = "{'related_val': (2,)}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('(2,)');
+    expect(output).not.toContain('(2]');
+  });
+
+  it('parses multi-element tuple', () => {
+    const input = "{'coords': (10, 20, 30)}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('(10, 20, 30)');
+  });
+
+  it('parses empty tuple', () => {
+    const input = "{'empty': ()}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('()');
+  });
+
+  it('parses nested tuples', () => {
+    const input = "{'args': ((1, 2), (3, 4))}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('((1, 2)');
+  });
+
+  it('parses tuple mixed with dict', () => {
+    const input = "{'args': ((1,), {})}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('((1,), {})');
+  });
+
+  it('does not convert function calls to tuples', () => {
+    const input = "{'key': dict(a=1)}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    // dict(a=1) should be preserved as a Python object, not converted to array
+    expect(result.format).toBe('python');
+  });
+
+  it('renders tuples with correct __isTuple marker in data', () => {
+    const input = "{'val': (1, 2)}";
+    const result = trySmartParse(input);
+    expect(result).not.toBeNull();
+    const val = result.data.val;
+    expect(Array.isArray(val)).toBe(true);
+    expect(val.__isTuple).toBe(true);
+    // __isTuple es una propiedad extra — comparar solo los valores
+    expect(val[0]).toBe(1);
+    expect(val[1]).toBe(2);
+    expect(val.length).toBe(2);
+  });
+});
+
+// ============================================================================
+// Caso Django — dict con objetos Django, tuplas y unicode
+// ============================================================================
+describe('Caso Django — Python dict con objetos Django', () => {
+  const djangoInput = "{'reverse': False, 'source_field': <django.db.models.fields.related.ForeignKey: settingpermission>, '_constructor_args': ((<SettingPermission: Justice League - Chile>,), {}), 'source_field_name': 'settingpermission', '_hints': {}, 'creation_counter': 602, 'target_field_name': 'empleado', '_db': None, 'query_field_name': u'setting_permission', 'core_filters': {u'setting_permission__id': 2}, 'prefetch_cache_name': 'approvers', 'instance': <SettingPermission: Justice League - Chile>, 'through': <class 'remunerations.models.SettingPermission_approvers'>, 'pk_field_names': {'settingpermission': u'id'}, 'symmetrical': False, 'model': <class 'main.models.Empleado'>, 'related_val': (2,), 'target_field': <django.db.models.fields.related.ForeignKey: empleado>, 'name': None}";
+
+  it('parses successfully', () => {
+    const result = trySmartParse(djangoInput);
+    expect(result).not.toBeNull();
+    expect(result.format).toBe('python');
+  });
+
+  it('preserves Django objects in output', () => {
+    const result = trySmartParse(djangoInput);
+    const output = stringifyPython(result.data, 4);
+    // Objetos Django preservados
+    expect(output).toContain('< django.db.models.fields.related.ForeignKey: settingpermission >');
+    expect(output).toContain('< SettingPermission: Justice League - Chile >');
+    expect(output).toContain('< class');
+  });
+
+  it('preserves tuples in output', () => {
+    const result = trySmartParse(djangoInput);
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain('_constructor_args');
+    // La tupla anidada debería renderizarse con (...)
+    expect(output).toContain('((');
+  });
+
+  it('preserves unicode strings in output', () => {
+    const result = trySmartParse(djangoInput);
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain("u'setting_permission'");
+    expect(output).toContain("u'id'");
+  });
+
+  it('handles single-element tuple (2,)', () => {
+    const result = trySmartParse(djangoInput);
+    const output = stringifyPython(result.data, 4);
+    expect(output).toContain("(2,)");
+  });
+
+  it('strips markers correctly for JSON output', () => {
+    const result = trySmartParse(djangoInput);
+    const cleaned = stripMarkers(result.data);
+    // Los objetos Django se convierten a strings en JSON
+    expect(cleaned.source_field).toBe('<django.db.models.fields.related.ForeignKey: settingpermission>');
+    expect(Array.isArray(cleaned._constructor_args)).toBe(true);
+    // related_val debería ser una tupla convertida a array
+    expect(Array.isArray(cleaned.related_val)).toBe(true);
+    expect(cleaned.related_val).toEqual([2]);
+  });
+});
