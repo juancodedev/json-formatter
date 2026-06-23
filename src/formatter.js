@@ -2,6 +2,33 @@ import { autoUnpack } from '../unpackers.js';
 import { jsonrepair } from 'jsonrepair';
 
 export const PY_OBJ_MARKER = '___PY_INTERNAL_OBJ___';
+const PY_TUPLE_MARKER = '___PY_TUPLE___';
+
+/**
+ * Convierte arrays marcados como tuplas de vuelta a una representación
+ * que stringifyPython pueda detectar (obj.__isTuple = true).
+ */
+function unwrapTuples(obj) {
+  if (Array.isArray(obj)) {
+    const result = obj.map(unwrapTuples);
+    result.__isTuple = false; // array normal por defecto
+    return result;
+  }
+  if (obj !== null && typeof obj === 'object') {
+    // Detectar wrapper de tupla: { "___PY_TUPLE___": [...] }
+    if (obj[PY_TUPLE_MARKER] !== undefined) {
+      const arr = unwrapTuples(obj[PY_TUPLE_MARKER]);
+      arr.__isTuple = true;
+      return arr;
+    }
+    const newObj = {};
+    for (const key in obj) {
+      newObj[key] = unwrapTuples(obj[key]);
+    }
+    return newObj;
+  }
+  return obj;
+}
 
 /**
  * Encuentra bloques JSON ({...} o [...]) dentro de texto arbitrario.
@@ -137,6 +164,19 @@ export function trySmartParse(text) {
     .replace(/\bFalse\b/g, 'false')
     .replace(/\bNone\b/g, 'null');
 
+  // 4e. Convertir tuplas de Python (...) a objetos JSON marcados.
+  //     Se envuelven como {"___PY_TUPLE___": [...]} para preservar la semántica de tupla.
+  //     Solo grupos que NO están precedidos por un identificador (no son llamadas a función).
+  let tuplePrev = '';
+  while (tuplePrev !== preprocessed) {
+    tuplePrev = preprocessed;
+    preprocessed = preprocessed.replace(/\(([^()]*)\)/g, (match, inner, offset) => {
+      const charBefore = offset > 0 ? preprocessed[offset - 1] : '';
+      if (/[a-zA-Z0-9_]/.test(charBefore)) return match; // Function call
+      return '{"' + PY_TUPLE_MARKER + '":[' + inner + ']}'; // Tuple → wrapped array
+    });
+  }
+
   // PASO 5 — jsonrepair: repara cualquier JSON-like (claves sin comillas,
   //          comillas simples, comas finales, comentarios, etc.)
   let repaired;
@@ -190,7 +230,7 @@ export function trySmartParse(text) {
     return obj;
   };
 
-  return { data: inject(parsed), format: protectedObjs.length > 0 ? 'python' : 'json' };
+  return { data: unwrapTuples(inject(parsed)), format: protectedObjs.length > 0 ? 'python' : 'json' };
 }
 
 /**
@@ -208,7 +248,9 @@ export function stringifyPython(obj, indent, level = 0) {
   if (typeof obj === 'string') {
     // Si es un objeto de Python marcado, quitamos la marca y devolvemos SIN comillas
     if (obj.startsWith(PY_OBJ_MARKER)) {
-      return obj.slice(PY_OBJ_MARKER.length);
+      const raw = obj.slice(PY_OBJ_MARKER.length);
+      // Agregar espacios alrededor de <...> para legibilidad (estilo beautifier.io)
+      return raw.replace(/<([^<>]+)>/g, '< $1 >');
     }
     // Escapar comillas simples y envolver
     return `'${obj.replace(/'/g, "\\'")}'`;
@@ -217,6 +259,23 @@ export function stringifyPython(obj, indent, level = 0) {
   if (typeof obj !== 'object') return obj.toString();
 
   const isArray = Array.isArray(obj);
+  const isTuple = isArray && obj.__isTuple === true;
+
+  // Renderizar tuplas con sintaxis Python: (a, b) o (a,) o ()
+  if (isTuple) {
+    if (obj.length === 0) return '()';
+    const entries = obj.map(item => stringifyPython(item, indent, level + 1));
+    const trailing = obj.length === 1 ? ',' : '';
+    // Para tuplas simples en una línea, formatear inline
+    const inline = entries.join(', ') + trailing;
+    // Si la tupla es simple (contenido corto), mostrarla inline
+    const totalLen = inline.length;
+    if (totalLen < 60 && !entries.some(e => e.includes('\n'))) {
+      return `(${inline})`;
+    }
+    return `(\n${nextIndent}${entries.join(',\n' + nextIndent)}${trailing ? ',\n' + currentIndent : '\n' + currentIndent})`;
+  }
+
   const open = isArray ? '[' : '{';
   const close = isArray ? ']' : '}';
 
