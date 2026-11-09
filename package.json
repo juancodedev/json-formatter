@@ -18,7 +18,6 @@
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.36.0",
     "codemirror": "^6.0.1",
-    "js-beautify": "^1.14.7",
     "jsonrepair": "^3.14.0"
   },
   "devDependencies": {
