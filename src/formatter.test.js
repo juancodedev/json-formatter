@@ -648,4 +648,147 @@ describe('Caso Django — Python dict con objetos Django', () => {
     expect(Array.isArray(cleaned.related_val)).toBe(true);
     expect(cleaned.related_val).toEqual([2]);
   });
+
+  it('is stable when its own Python output is formatted again', () => {
+    const once = stringifyPython(trySmartParse(djangoInput).data, 4);
+    const twice = stringifyPython(trySmartParse(once).data, 4);
+    expect(twice).toBe(once);
+  });
+});
+
+// ============================================================================
+// String contents must survive the Python preprocessing untouched
+// ============================================================================
+describe('string contents are preserved', () => {
+  it('keeps Python keywords inside strings', () => {
+    expectParse("{'a': 'True story, None left', 'b': None}", { a: 'True story, None left', b: null });
+  });
+
+  it('keeps HTML inside single-quoted strings', () => {
+    expectParse("{'html': '<b>hi</b>', 'x': True,}", { html: '<b>hi</b>', x: true });
+  });
+
+  it('keeps HTML with quotes inside double-quoted strings', () => {
+    expectParse(`{"html": "<a href='x'>y</a>", "x": 1,}`, { html: "<a href='x'>y</a>", x: 1 });
+  });
+
+  it('keeps parentheses inside single-quoted strings', () => {
+    expectParse("{'msg': 'hello (world)', 'x': None}", { msg: 'hello (world)', x: null });
+  });
+
+  it('keeps parentheses inside double-quoted strings', () => {
+    expectParse('{"msg": "hello (world)", "x": 1,}', { msg: 'hello (world)', x: 1 });
+  });
+
+  it('keeps call-like text inside strings', () => {
+    expectParse("{'msg': 'call foo(bar) now', 'x': None}", { msg: 'call foo(bar) now', x: null });
+  });
+
+  it('keeps unicode-prefix-like text inside strings', () => {
+    expectParse(`{'a': "u'x'", 'b': 1}`, { a: "u'x'", b: 1 });
+  });
+
+  it('keeps URLs with parentheses', () => {
+    expectParse("{a: 'http://x.io/?q=(1)', b: 2}", { a: 'http://x.io/?q=(1)', b: 2 });
+  });
+
+  it('keeps __proto__ keys', () => {
+    const cleaned = stripMarkers(trySmartParse('{"__proto__": 1, "x": 2,}').data);
+    expect(Object.keys(cleaned)).toEqual(['__proto__', 'x']);
+  });
+});
+
+// ============================================================================
+// Python-only syntax outside strings
+// ============================================================================
+describe('Python syntax outside strings', () => {
+  it('keeps object reprs that contain apostrophes', () => {
+    expectParse("{'u': <User: O'Brien>, 'n': 1}", { u: "<User: O'Brien>", n: 1 }, 'python');
+  });
+
+  it('keeps nested object reprs whole', () => {
+    expectParse("{'q': <QuerySet [<A: x>, <A: y>]>}", { q: '<QuerySet [<A: x>, <A: y>]>' }, 'python');
+  });
+
+  it('keeps call arguments that contain parentheses in strings', () => {
+    expectParse("{'f': Foo('a)b'), 'n': 1}", { f: "Foo('a)b')", n: 1 }, 'python');
+  });
+
+  it('keeps nested calls whole', () => {
+    expectParse("{'d': datetime.datetime(2024, 1, tzinfo=utc(0))}", { d: 'datetime.datetime(2024, 1, tzinfo=utc(0))' }, 'python');
+  });
+
+  it('accepts bytes literals', () => {
+    expectParse("{'a': b'abc', 'n': 1}", { a: "b'abc'", n: 1 }, 'python');
+  });
+});
+
+// ============================================================================
+// JSON embedded in log lines
+// ============================================================================
+describe('JSON inside surrounding text', () => {
+  it('ignores apostrophes in the surrounding prose', () => {
+    expectParse(`Don't panic: {"a": 1, "b": [1,2]}`, { a: 1, b: [1, 2] });
+  });
+
+  it('skips a log timestamp prefix', () => {
+    expectParse('[2024-01-01 10:00:00] payload {"a":1}', { a: 1 });
+  });
+
+  it('skips log tags on both ends', () => {
+    expectParse('[INFO] got {"a": 1} [done]', { a: 1 });
+  });
+
+  it('ranks real data above longer log tags', () => {
+    expect(extractJsonCandidates('[2024-01-01 10:00:00] {"a":1}')[0]).toBe('{"a":1}');
+  });
+
+  it('still merges newline-delimited objects', () => {
+    expectParse('{"a":1}\n{"b":2}', [{ a: 1 }, { b: 2 }]);
+  });
+});
+
+// ============================================================================
+// URL decoding only applies to fully encoded input
+// ============================================================================
+describe('URL-encoded input', () => {
+  it('decodes a fully encoded payload', () => {
+    expectParse('%7B%22a%22%3A1%7D', { a: 1 });
+  });
+
+  it('does not hang on invalid percent sequences', () => {
+    expectParse('{"a":"%ff%ff"}', { a: '%ff%ff' });
+    expectParse('{"a":"%ff%ff", "b":1,}', { a: '%ff%ff', b: 1 });
+    expect(trySmartParse('%ff%ff').data).toBe('%ff%ff');
+  });
+
+  it('does not decode values of valid JSON', () => {
+    expectParse('{"a":"x%20%20y"}', { a: 'x%20%20y' });
+  });
+
+  it('does not decode values of repairable JSON', () => {
+    expectParse('{"a":"%22%22", "b":1,}', { a: '%22%22', b: 1 });
+  });
+});
+
+// ============================================================================
+// Python output escaping
+// ============================================================================
+describe('stringifyPython escaping', () => {
+  it('escapes newlines and tabs', () => {
+    expect(stringifyPython({ a: 'l1\nl2\tx' }, 0)).toBe("{\n'a': 'l1\\nl2\\tx'\n}");
+  });
+
+  it('escapes backslashes', () => {
+    expect(stringifyPython({ path: 'C:\\tmp' }, 0)).toBe("{\n'path': 'C:\\\\tmp'\n}");
+  });
+
+  it('does not add spaces inside unicode string values', () => {
+    const { data } = trySmartParse("{'a': u'<b>x</b>'}");
+    expect(stringifyPython(data, 0)).toBe("{\n'a': u'<b>x</b>'\n}");
+  });
+
+  it('escapes apostrophes in keys', () => {
+    expect(stringifyPython({ "it's": 1 }, 0)).toBe("{\n'it\\'s': 1\n}");
+  });
 });

@@ -4,6 +4,152 @@ import { jsonrepair } from 'jsonrepair';
 export const PY_OBJ_MARKER = '___PY_INTERNAL_OBJ___';
 const PY_TUPLE_MARKER = '___PY_TUPLE___';
 
+// Bloque entre corchetes sin estructura de datos: [INFO], [2024-01-01 10:00:00]
+const LOG_TAG = /^\[[^[\]{}"',]*\]$/;
+const PY_KEYWORDS = { True: 'true', False: 'false', None: 'null' };
+
+function isLogTag(block) {
+  return LOG_TAG.test(block) && Number.isNaN(Number(block.slice(1, -1)));
+}
+
+/**
+ * Indica si la comilla en la posición i abre un string.
+ * Un apóstrofe pegado a una palabra (Don't, O'Brien) no lo hace,
+ * salvo los prefijos de string de Python (u'...', b'...').
+ */
+function opensString(text, i) {
+  if (text[i] === '"') return true;
+  if (text[i] !== "'") return false;
+  if (!/\w/.test(text[i - 1] ?? '')) return true;
+  return /(?:^|\W)[ub]$/i.test(text.slice(Math.max(0, i - 2), i));
+}
+
+/** Retorna el índice siguiente al cierre del string que abre en start. */
+function skipString(text, start) {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === quote) return i + 1;
+  }
+  return text.length;
+}
+
+/** Retorna el índice siguiente al '>' que balancea el '<' en start, o -1. */
+function findReprEnd(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '<') depth++;
+    else if (text[i] === '>' && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** Retorna el índice siguiente al ')' que balancea el '(' en start, o -1. */
+function findCallEnd(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (opensString(text, i)) {
+      i = skipString(text, i) - 1;
+    } else if (text[i] === '(') {
+      depth++;
+    } else if (text[i] === ')' && --depth === 0) {
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+/** Retorna el índice donde termina el comentario JS que abre en start, o start si no hay. */
+function skipComment(text, start) {
+  if (text[start] !== '/') return start;
+  if (text[start + 1] === '/') {
+    const end = text.indexOf('\n', start);
+    return end === -1 ? text.length : end;
+  }
+  if (text[start + 1] === '*') {
+    const end = text.indexOf('*/', start);
+    return end === -1 ? text.length : end + 2;
+  }
+  return start;
+}
+
+/**
+ * Convierte la sintaxis exclusiva de Python a algo que jsonrepair entienda.
+ * Recorre el texto token a token para que el contenido de los strings y
+ * comentarios se copie intacto. Lo que no tiene equivalente JSON
+ * (<...>, llamadas, u'...', b'...') se reemplaza usando protect.
+ */
+function convertPythonSyntax(text, protect) {
+  const word = /[\w$][\w$.]*/y;
+  const reprStart = /<\s*[A-Za-z_]/y;
+  let out = '';
+  let openTuples = 0;
+  let i = 0;
+
+  while (i < text.length) {
+    const char = text[i];
+
+    if (char === '"' || char === "'") {
+      const end = skipString(text, i);
+      out += text.slice(i, end);
+      i = end;
+      continue;
+    }
+
+    const commentEnd = skipComment(text, i);
+    if (commentEnd > i) {
+      out += text.slice(i, commentEnd);
+      i = commentEnd;
+      continue;
+    }
+
+    reprStart.lastIndex = i;
+    if (reprStart.test(text)) {
+      const end = findReprEnd(text, i);
+      if (end !== -1) {
+        out += protect(text.slice(i, end));
+        i = end;
+        continue;
+      }
+    }
+
+    word.lastIndex = i;
+    const match = word.exec(text);
+    if (match) {
+      const wordEnd = i + match[0].length;
+      const next = text[wordEnd];
+      let end = -1;
+      if ((next === '"' || next === "'") && /^[ub]$/i.test(match[0])) {
+        end = skipString(text, wordEnd);
+      } else if (next === '(' && !/^\d/.test(match[0])) {
+        end = findCallEnd(text, wordEnd);
+      }
+      if (end !== -1) {
+        out += protect(text.slice(i, end));
+        i = end;
+      } else {
+        out += Object.hasOwn(PY_KEYWORDS, match[0]) ? PY_KEYWORDS[match[0]] : match[0];
+        i = wordEnd;
+      }
+      continue;
+    }
+
+    // Las tuplas se envuelven como {"___PY_TUPLE___": [...]} para preservar su semántica
+    if (char === '(') {
+      openTuples++;
+      out += `{"${PY_TUPLE_MARKER}":[`;
+    } else if (char === ')' && openTuples > 0) {
+      openTuples--;
+      out += ']}';
+    } else {
+      out += char;
+    }
+    i++;
+  }
+
+  return out;
+}
+
 /**
  * Convierte arrays marcados como tuplas de vuelta a una representación
  * que stringifyPython pueda detectar (obj.__isTuple = true).
@@ -21,11 +167,7 @@ function unwrapTuples(obj) {
       arr.__isTuple = true;
       return arr;
     }
-    const newObj = {};
-    for (const key in obj) {
-      newObj[key] = unwrapTuples(obj[key]);
-    }
-    return newObj;
+    return Object.fromEntries(Object.entries(obj).map(([key, val]) => [key, unwrapTuples(val)]));
   }
   return obj;
 }
@@ -61,7 +203,7 @@ export function extractJsonCandidates(text) {
     }
 
     // Tanto comillas simples como dobles pueden delimitar strings
-    if (char === '"' || char === "'") {
+    if (opensString(text, i)) {
       inString = true;
       stringChar = char;
       continue;
@@ -92,8 +234,8 @@ export function extractJsonCandidates(text) {
     }
   }
 
-  // Ordenar por longitud descendente: el más largo suele ser el más relevante
-  candidates.sort((a, b) => b.length - a.length);
+  // Las etiquetas de log van al final; luego, el más largo suele ser el más relevante
+  candidates.sort((a, b) => isLogTag(a) - isLogTag(b) || b.length - a.length);
   return candidates;
 }
 
@@ -106,12 +248,20 @@ export function trySmartParse(text) {
   text = text.trim();
   if (!text) return null;
 
+  // Un JSON válido no necesita ninguna transformación. Un string JSON sigue el
+  // flujo normal porque puede contener JSON serializado.
+  try {
+    const data = JSON.parse(text);
+    if (typeof data !== 'string') return { data, format: 'json' };
+  } catch (_) { /* continuar */ }
+
   // PASO 0 — Extraer JSON de texto con contenido mezclado.
   // Si el texto no arranca con { o [ (o no termina con } o ]),
   // buscamos bloques JSON dentro del texto.
   const startsAsJson = text.startsWith('{') || text.startsWith('[');
   const endsAsJson = text.endsWith('}') || text.endsWith(']');
-  if (!startsAsJson || !endsAsJson) {
+  const startsWithLogTag = isLogTag(text.slice(0, text.indexOf(']') + 1));
+  if (!startsAsJson || !endsAsJson || startsWithLogTag) {
     const candidates = extractJsonCandidates(text);
     if (candidates.length > 0) {
       text = candidates[0]; // Usar el candidato más largo
@@ -119,7 +269,10 @@ export function trySmartParse(text) {
   }
 
   // PASO 1 — Des-ofuscar/Des-empaquetar (P.A.C.K.E.R., URL encode, etc.)
-  try { text = autoUnpack(text); } catch (e) { /* silencioso */ }
+  //          Solo si el texto no es ya una estructura: sus valores no deben decodificarse.
+  if (!/^[[{(]/.test(text)) {
+    try { text = autoUnpack(text); } catch (e) { /* silencioso */ }
+  }
 
   // PASO 2 — Quitar comillas externas si se pegó el bloque como string literal
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
@@ -140,42 +293,7 @@ export function trySmartParse(text) {
     return `"${PY_OBJ_MARKER}${protectedObjs.length - 1}"`;
   };
 
-  let preprocessed = text;
-
-  // 4a. Strings unicode Python 2 (soporte para comillas escapadas)
-  preprocessed = preprocessed
-    .replace(/\bu'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_, inner) => protect(`u'${inner}'`))
-    .replace(/\bu"([^"\\]*(?:\\.[^"\\]*)*)"/g, (_, inner) => protect(`u"${inner}"`));
-
-  // 4b & 4c. Objetos y Funciones (anidados, ej: <QuerySet [<Model: ...>]>, func(other()))
-  let changed = true;
-  while (changed) {
-    const original = preprocessed;
-    // Marcamos los objetos más internos primero (entre < > sin otros < > dentro)
-    preprocessed = preprocessed.replace(/<[^<>]+>/g, protect);
-    // Marcamos las funciones más internas primero
-    preprocessed = preprocessed.replace(/[a-zA-Z_][a-zA-Z0-9_.]*\([^()]*\)/g, protect);
-    changed = (preprocessed !== original);
-  }
-
-  preprocessed = preprocessed
-    // 4d. Booleanos y None de Python → JSON
-    .replace(/\bTrue\b/g, 'true')
-    .replace(/\bFalse\b/g, 'false')
-    .replace(/\bNone\b/g, 'null');
-
-  // 4e. Convertir tuplas de Python (...) a objetos JSON marcados.
-  //     Se envuelven como {"___PY_TUPLE___": [...]} para preservar la semántica de tupla.
-  //     Solo grupos que NO están precedidos por un identificador (no son llamadas a función).
-  let tuplePrev = '';
-  while (tuplePrev !== preprocessed) {
-    tuplePrev = preprocessed;
-    preprocessed = preprocessed.replace(/\(([^()]*)\)/g, (match, inner, offset) => {
-      const charBefore = offset > 0 ? preprocessed[offset - 1] : '';
-      if (/[a-zA-Z0-9_]/.test(charBefore)) return match; // Function call
-      return '{"' + PY_TUPLE_MARKER + '":[' + inner + ']}'; // Tuple → wrapped array
-    });
-  }
+  const preprocessed = convertPythonSyntax(text, protect);
 
   // PASO 5 — jsonrepair: repara cualquier JSON-like (claves sin comillas,
   //          comillas simples, comas finales, comentarios, etc.)
@@ -207,30 +325,29 @@ export function trySmartParse(text) {
           return obj;
         }
 
-        let value = protectedObjs[index];
-        // Resolvemos marcadores anidados (pueden estar con o sin comillas escapadas)
-        const nestedRegex = new RegExp(`"?${PY_OBJ_MARKER}(\\d+)"?`, 'g');
-        value = value.replace(nestedRegex, (_, idx) => {
-          const res = inject(PY_OBJ_MARKER + idx);
-          return res.startsWith(PY_OBJ_MARKER) ? res.slice(PY_OBJ_MARKER.length) : res;
-        });
-        return PY_OBJ_MARKER + value;
+        return PY_OBJ_MARKER + protectedObjs[index];
       }
     }
     if (Array.isArray(obj)) return obj.map(inject);
     if (obj !== null && typeof obj === 'object') {
-      const newObj = {};
-      for (const key in obj) {
-        // Resolvemos el marcador pero MANTENEMOS el prefijo para que el stringifier sepa que es un objeto Python
-        const resolvedKey = inject(key);
-        newObj[resolvedKey] = inject(obj[key]);
-      }
-      return newObj;
+      // Resolvemos el marcador pero MANTENEMOS el prefijo para que el stringifier sepa que es un objeto Python
+      return Object.fromEntries(Object.entries(obj).map(([key, val]) => [inject(key), inject(val)]));
     }
     return obj;
   };
 
   return { data: unwrapTuples(inject(parsed)), format: protectedObjs.length > 0 ? 'python' : 'json' };
+}
+
+/** Serializa un string como literal de Python con comillas simples. */
+function quotePython(str) {
+  const escaped = str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+  return `'${escaped}'`;
 }
 
 /**
@@ -249,11 +366,12 @@ export function stringifyPython(obj, indent, level = 0) {
     // Si es un objeto de Python marcado, quitamos la marca y devolvemos SIN comillas
     if (obj.startsWith(PY_OBJ_MARKER)) {
       const raw = obj.slice(PY_OBJ_MARKER.length);
+      // Los literales u'...' y b'...' son strings: su contenido no se toca
+      if (/^[ub]['"]/i.test(raw)) return raw;
       // Agregar espacios alrededor de <...> para legibilidad (estilo beautifier.io)
-      return raw.replace(/<([^<>]+)>/g, '< $1 >');
+      return raw.replace(/<\s*([^<>]+?)\s*>/g, '< $1 >');
     }
-    // Escapar comillas simples y envolver
-    return `'${obj.replace(/'/g, "\\'")}'`;
+    return quotePython(obj);
   }
 
   if (typeof obj !== 'object') return obj.toString();
@@ -286,7 +404,7 @@ export function stringifyPython(obj, indent, level = 0) {
         if (typeof key === 'string' && key.startsWith(PY_OBJ_MARKER)) {
           pyKey = key.slice(PY_OBJ_MARKER.length);
         } else {
-          pyKey = typeof key === 'string' ? `'${key}'` : key;
+          pyKey = quotePython(key);
         }
         return `${pyKey}: ${stringifyPython(val, indent, level + 1)}`;
       });
@@ -317,12 +435,7 @@ export function stripMarkers(obj) {
   }
   if (Array.isArray(obj)) return obj.map(stripMarkers);
   if (obj !== null && typeof obj === 'object') {
-    const newObj = {};
-    for (const key in obj) {
-      const cleanKey = key.startsWith(PY_OBJ_MARKER) ? stripMarkers(key) : key;
-      newObj[cleanKey] = stripMarkers(obj[key]);
-    }
-    return newObj;
+    return Object.fromEntries(Object.entries(obj).map(([key, val]) => [stripMarkers(key), stripMarkers(val)]));
   }
   return obj;
 }
