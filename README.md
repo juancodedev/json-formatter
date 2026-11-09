@@ -24,7 +24,6 @@ A web-based JSON formatting tool with a powerful smart parser, built with [CodeM
 
 - [CodeMirror 6](https://codemirror.net/6/) — code editor with JSON syntax highlighting, search, and One Dark theme
 - [Vite](https://vitejs.dev/) — dev server and build tool
-- [js-beautify](https://github.com/beautifier/js-beautify) — advanced formatting
 - [jsonrepair](https://github.com/josdejong/jsonrepair) — repair malformed JSON
 - Vanilla CSS with CSS custom properties for theming
 
