@@ -68,23 +68,14 @@ export function autoUnpack(text) {
     while (iterated) {
         iterated = false;
         
-        if (P_A_C_K_E_R.detect(unpacked)) {
-            unpacked = P_A_C_K_E_R.unpack(unpacked);
-            iterated = true;
-            continue;
-        }
-
-        if (Urlencoded.detect(unpacked)) {
-            unpacked = Urlencoded.unpack(unpacked);
-            iterated = true;
-            continue;
-        }
-
-        if (JavascriptObfuscator.detect(unpacked)) {
-            const next = JavascriptObfuscator.unpack(unpacked);
+        for (const unpacker of [P_A_C_K_E_R, Urlencoded, JavascriptObfuscator]) {
+            if (!unpacker.detect(unpacked)) continue;
+            // Si no hubo cambios (ej: secuencia % inválida) se prueba el siguiente
+            const next = unpacker.unpack(unpacked);
             if (next !== unpacked) {
                 unpacked = next;
                 iterated = true;
+                break;
             }
         }
     }
